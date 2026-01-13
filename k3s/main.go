@@ -51,6 +51,9 @@ type K3S struct {
 	// +private
 	Debug bool
 
+	// +private
+	Verbosity int
+
 	Container *dagger.Container
 }
 
@@ -73,8 +76,25 @@ func New(
 	// +optional
 	// +default="false"
 	debug bool,
+
+	// log verbosity level (0=minimal, 1=errors/warnings, 2=info).
+	// +optional
+	// +default="0"
+	verbosity int,
 ) *K3S {
 	ccache := dag.CacheVolume("k3s_config_" + name)
+
+	// Create logging config file
+	// Named to load before k3s's 00-k3s-defaults.conf
+	loggingConfig := fmt.Sprintf(`apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+logging:
+  verbosity: %d
+`, verbosity)
+	loggingConfigFile := dag.Directory().
+		WithNewFile("00-a-logging.conf", loggingConfig).
+		File("00-a-logging.conf")
+
 	ctr := dag.Container().
 		From(image).
 		WithNewFile("/usr/bin/entrypoint.sh", entrypoint, dagger.ContainerWithNewFileOpts{
@@ -94,6 +114,7 @@ func New(
 			}
 			return c
 		}).
+		WithMountedFile("/var/lib/rancher/k3s/agent/etc/kubelet.conf.d/00-a-logging.conf", loggingConfigFile).
 		WithMountedTemp("/var/log").
 		WithExposedPort(6443)
 	return &K3S{
@@ -102,25 +123,25 @@ func New(
 		Container:     ctr,
 		EnableTraefik: enableTraefik,
 		Debug:         debug,
+		Verbosity:     verbosity,
 	}
 }
 
 // Returns a newly initialized kind cluster
 func (m *K3S) Server() *dagger.Service {
-	debugFlags := ""
+	cmd := "k3s server --bind-address $(ip route | grep src | awk '{print $NF}') --disable metrics-server --egress-selector-mode=disabled"
+
 	if m.Debug {
-		debugFlags = "--debug "
+		cmd += " --debug"
 	}
-	traefikFlags := ""
+
 	if !m.EnableTraefik {
-		traefikFlags = "--disable traefik "
+		cmd += " --disable traefik"
 	}
+
 	return m.Container.
 		AsService(dagger.ContainerAsServiceOpts{
-			Args: []string{
-				"sh", "-c",
-				"k3s server " + debugFlags + "--bind-address $(ip route | grep src | awk '{print $NF}') " + traefikFlags + "--disable metrics-server --egress-selector-mode=disabled",
-			},
+			Args:                     []string{"sh", "-c", cmd},
 			InsecureRootCapabilities: true,
 			UseEntrypoint:            true,
 		})
